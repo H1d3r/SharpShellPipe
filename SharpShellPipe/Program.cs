@@ -9,21 +9,27 @@
  * Author:        Jean-Pierre LESUEUR (@DarkCoderSc)
  * Email:         jplesueur@phrozen.io
  * Website:       https://www.phrozen.io
- * GitHub:        https://github.com/DarkCoderSc
+ * GitHub:        https://github.com/PhrozenIO
+ *                https://github.com/DarkCoderSc
+ *                
  * Twitter:       https://twitter.com/DarkCoderSc
  * License:       Apache-2.0
  * 
- * By using this code, the user agrees to indemnify and hold Jean-Pierre LESUEUR and 
- * PHROZEN SAS harmless from any and all claims, liabilities, costs, and expenses arising
- * from the use, misuse, or distribution of this code. The user also agrees not to hold 
- * Jean-Pierre LESUEUR or PHROZEN SAS responsible for any errors or omissions in the code,
- * and to take full responsibility for ensuring that the code meets the user's needs.
+ * This script is provided "as is", without warranty of any kind, express or implied,     
+ * including but not limited to the warranties of merchantability, fitness for a particular     
+ * purpose and noninfringement. In no event shall the authors or copyright holders be liable
+ * for any claim, damages or other liability, whether in an action of contract, tort or 
+ * otherwise, arising from, out of or in connection with the software or the use or other 
+ * dealings in the software.                                 
  * 
  * =========================================================================================
  */
 
+using CommandLine;
+using System.Collections;
 using System.Diagnostics;
 using System.IO.Pipes;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -34,8 +40,6 @@ class Program
 
     // Program Configuration Begin ++++++++++++++++++++++++++++++++++++++++++++++++++++
     public const string NamedPipePrefix = "DCSC";
-    // Replace passphrase with null or empty string to disable traffic encryption
-    public const string? EncryptionPassphrase = null; // "p4ssw0rd!";
     // Program Configuration End ++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
     public const string StdOutPipeName = $"{NamedPipePrefix}_stdOutPipe";
@@ -80,7 +84,7 @@ class Program
     protected class EncryptedPacket
     {
         public byte[] Dummy1 { get; set; }
-        public int Data { get; set; }
+        public byte[] Data { get; set; }
         public byte[] Dummy2 { get; set; }
     }
 
@@ -146,12 +150,12 @@ class Program
     /// an alternative encryption technique. Instead of employing both RSA and AES,
     /// we will use just a shared passphrase for encryption.
     /// </summary>
-    /// <param name="b"></param>
+    /// <param name="plainData"></param>
     /// <param name="encryptionKey"></param>
     /// <returns></returns>
-    public static string Encrypt(int b)
+    public static string Encrypt(byte[] plainData, string encryptionPassphrase)
     {
-        (byte[] encryptionKey, byte[] salt) = SetupEncryptionKey(EncryptionPassphrase);
+        (byte[] encryptionKey, byte[] salt) = SetupEncryptionKey(encryptionPassphrase);
 
         // https://learn.microsoft.com/en-us/dotnet/api/system.security.cryptography.randomnumbergenerator?view=net-7.0?WT_mc_id=SEC-MVP-5005282
         using RandomNumberGenerator randomGenerator = RandomNumberGenerator.Create();
@@ -170,7 +174,7 @@ class Program
         EncryptedPacket encryptedPacket = new()
         {
             Dummy1 = dummy1,
-            Data = b,
+            Data = plainData,
             Dummy2 = dummy2,
         };
 
@@ -198,6 +202,17 @@ class Program
     }
 
     /// <summary>
+    /// Encrypt String Wrapper
+    /// </summary>
+    /// <param name="value"></param>
+    /// <param name="encryptionPassphrase"></param>
+    /// <returns></returns>
+    public static String EncryptString(string value, string encryptionPassphrase)
+    {
+        return Encrypt(Encoding.UTF8.GetBytes(value), encryptionPassphrase);
+    }
+
+    /// <summary>
     /// This method reverses the encryption process. It requires the Encrypted Bundle to be supplied as a JSON string.
     /// If the decryption process and all its associated steps are successful, the method will return the
     /// decrypted plaintext, represented as a single character.
@@ -205,13 +220,13 @@ class Program
     /// <param name="encryptedData"></param>
     /// <param name="encryptionKey"></param>
     /// <returns></returns>
-    public static char Decrypt(string encryptedData)
+    public static byte[]? Decrypt(string encryptedData, string encryptionPassphrase)
     {
         EncryptedBundle? encryptedBundle = JsonSerializer.Deserialize<EncryptedBundle>(encryptedData);
         if (encryptedBundle == null)
-            return (char)0;
+            return null;
 
-        (byte[] encryptionKey, _) = SetupEncryptionKey(EncryptionPassphrase, encryptedBundle.Salt);
+        (byte[] encryptionKey, _) = SetupEncryptionKey(encryptionPassphrase, encryptedBundle.Salt);
 
         byte[] plainText = new byte[encryptedBundle.Data.Length];
 
@@ -223,9 +238,39 @@ class Program
 
         EncryptedPacket? encryptedPacket = JsonSerializer.Deserialize<EncryptedPacket>(plainText);
         if (encryptedPacket == null)
-            return (char)0;
+            return null;
 
-        return (char)encryptedPacket.Data;
+        return encryptedPacket.Data;
+    }
+
+    /// <summary>
+    /// Decrypt a single character from an encrypted data bundle.
+    /// </summary>
+    /// <param name="encryptedData"></param>
+    /// <param name="encryptionPassphrase"></param>
+    /// <returns></returns>
+    public static char DecryptChar(string encryptedData, string encryptionPassphrase)
+    {
+        byte[]? plainText = Decrypt(encryptedData, encryptionPassphrase);
+        if (plainText == null)
+            return '\0';
+
+        return Encoding.UTF8.GetString(plainText)[0];
+    }
+
+    /// <summary>
+    /// Decrypt String Wrapper
+    /// </summary>
+    /// <param name="encryptedData"></param>
+    /// <param name="encryptionPassphrase"></param>
+    /// <returns></returns>
+    public static string DecryptString(string encryptedData, string encryptionPassphrase)
+    {
+        byte[]? plainText = Decrypt(encryptedData, encryptionPassphrase);
+        if (plainText == null)
+            return String.Empty;
+
+        return Encoding.UTF8.GetString(plainText);
     }
 
     /// <summary>
@@ -235,10 +280,42 @@ class Program
     /// the advantage of being highly stable and easy to understand. You're welcome to optimize the mechanism according
     /// to your own preferences.    
     /// </summary>
-    public static void ShellPipeServer()
+    public static void ShellPipeServer(string? encryptionPassphrase = null, string? userName = null, System.Security.SecureString? password = null, string? domain = null)
     {
         while (true)
         {
+            // https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.processstartinfo?view=net-7.0?WT_mc_id=SEC-MVP-5005282
+            ProcessStartInfo processStartInfo = new()
+            {
+                FileName = "powershell.exe",
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+
+            if (!string.IsNullOrEmpty(userName))
+            {
+                processStartInfo.WorkingDirectory = Environment.GetEnvironmentVariable("SystemRoot");
+                processStartInfo.UserName = userName;
+                processStartInfo.Password = password;
+                processStartInfo.Domain = domain;
+            }
+
+            using Process shell = new() { StartInfo = processStartInfo };
+
+            try
+            {
+                shell.Start();
+            }
+            catch (Exception e)
+            {
+                WriteVerbose(string.Format("Exception: \"{0}\"", e.Message), 'x');
+
+                break;
+            }
+
             // https://learn.microsoft.com/en-us/dotnet/api/system.io.pipes.namedpipeserverstream?view=net-7.0?WT_mc_id=SEC-MVP-5005282
             using NamedPipeServerStream stdOutPipe = new(StdOutPipeName, PipeDirection.Out);
             using NamedPipeServerStream stdInPipe = new(StdInPipeName, PipeDirection.In);
@@ -249,24 +326,7 @@ class Program
             stdInPipe.WaitForConnection();
             ///                                  
 
-            WriteVerbose("Peer connected!", '+');
-
-            // https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.processstartinfo?view=net-7.0?WT_mc_id=SEC-MVP-5005282
-            ProcessStartInfo processStartInfo = new()
-            {
-                FileName = "cmd.exe",
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-
-            using Process shell = new() { StartInfo = processStartInfo };
-
-            shell.Start();
-
-            WriteVerbose("Shell spawned!", '+');
+            WriteVerbose("Peer connected!", '+');                                
 
             Thread stdOutThread = new(() =>
             {
@@ -277,12 +337,8 @@ class Program
                     int b;
                     while ((b = shell.StandardOutput.Read()) != -1)
                     {
-                        if (!String.IsNullOrEmpty(EncryptionPassphrase))
-                        {
-                            string encryptedData = Encrypt(b);
-
-                            writer.WriteLine(encryptedData);
-                        }
+                        if (!String.IsNullOrEmpty(encryptionPassphrase))                            
+                            writer.WriteLine(Encrypt(BitConverter.GetBytes(b), encryptionPassphrase));                            
                         else
                             writer.Write((char)b);
                     }
@@ -298,23 +354,18 @@ class Program
                     using StreamReader reader = new(stdInPipe);
                     ///
 
-                    if (!String.IsNullOrEmpty(EncryptionPassphrase))
+                    if (!String.IsNullOrEmpty(encryptionPassphrase))
                     {
-                        string? encryptedData;
-                        char plainChar;
+                        string? encryptedData;                            
 
-                        while ((encryptedData = reader.ReadLine()) != null)
-                        {
-                            plainChar = Decrypt(encryptedData);
-                            if (plainChar != '\0')
-                                shell.StandardInput.Write(plainChar);
-                        }
+                        while ((encryptedData = reader.ReadLine()) != null)                                                         
+                            shell.StandardInput.Write(DecryptString(encryptedData, encryptionPassphrase));                            
                     }
                     else
                     {
-                        int b;
-                        while ((b = reader.Read()) != -1)
-                            shell.StandardInput.Write((char)b);
+                        string? userInput;
+                        while ((userInput = reader.ReadLine()) != null)                                                                      
+                            shell.StandardInput.WriteLine(userInput);
                     }
                 }
                 catch { }
@@ -339,7 +390,7 @@ class Program
 
             ///
             WriteVerbose("Peer disconnected!", '!');
-        }
+        }        
     }
 
     /// <summary>
@@ -348,7 +399,7 @@ class Program
     /// between the client and server is facilitated over Named Pipes using the 
     /// Server Message Block (SMB) protocol.
     /// </summary>
-    public static void ShellPipeClient(string? serverComputerName)
+    public static void ShellPipeClient(string? serverComputerName = null, string? encryptionPassphrase = null)
     {
         if (String.IsNullOrEmpty(serverComputerName))
             serverComputerName = ".";
@@ -356,13 +407,16 @@ class Program
 
         using NamedPipeClientStream pipeStdout = new(serverComputerName, StdOutPipeName, PipeDirection.In);
         using NamedPipeClientStream pipeStdin = new(serverComputerName, StdInPipeName, PipeDirection.Out);
-
-        WriteVerbose("Connecting to remote system...", '*');
+       
+        WriteVerbose(string.Format(
+            "Establishing {0} connection to remote system...", 
+            String.IsNullOrEmpty(encryptionPassphrase) ? "an unsecure" : "a secure"
+            ), '*');
 
         pipeStdout.Connect();
         pipeStdin.Connect();
 
-        WriteVerbose("Successfully connected, spawning shell...", '+');
+        WriteVerbose("Successfully connected, spawning shell...", '+');               
 
         int b;
         Thread stdOutThread = new(() =>
@@ -370,18 +424,18 @@ class Program
             try
             {
                 using StreamReader reader = new(pipeStdout);
-                ///
+                ///                
 
-                if (!String.IsNullOrEmpty(EncryptionPassphrase))
+                if (!String.IsNullOrEmpty(encryptionPassphrase))
                 {
                     string? encryptedData;
                     char plainChar;
 
                     while ((encryptedData = reader.ReadLine()) != null)
                     {
-                        plainChar = Decrypt(encryptedData);
+                        plainChar = DecryptChar(encryptedData, encryptionPassphrase);
                         if (plainChar != '\0')
-                            Console.Write(plainChar);
+                            Console.Write(plainChar);                        
                     }
                 }
                 else
@@ -401,25 +455,20 @@ class Program
             if (!pipeStdout.IsConnected)
                 break;
 
-            string? cmd = Console.ReadLine();
-            if (cmd == null)
-                continue;
-            ///            
+            string? cmd = Console.ReadLine();         
+            cmd = String.IsNullOrEmpty(cmd) ? "" : cmd.Trim();
 
             if (!pipeStdin.IsConnected || !pipeStdout.IsConnected)
                 break;
 
-            if (EncryptionPassphrase != null)
-            {
-                foreach (char c in cmd + "\r\n")
-                    writer.WriteLine(Encrypt(c));
-            }
-            else
-                writer.WriteLine(cmd);
+            if (!String.IsNullOrEmpty(encryptionPassphrase))                         
+                writer.WriteLine(Encrypt(Encoding.UTF8.GetBytes(cmd + '\n'), encryptionPassphrase));            
+            else            
+                writer.WriteLine(cmd);                            
 
             ///
             if (cmd.Equals("exit", StringComparison.OrdinalIgnoreCase))
-                Thread.Sleep(1000);
+                Thread.Sleep(500);
         }
 
         pipeStdout.Close();
@@ -431,30 +480,53 @@ class Program
     }
 
     /// <summary>
+    /// Command-line options
+    /// </summary>
+    public class Options
+    {
+        [Option('p', "passphrase", Required = false, HelpText = "A passphrase is used to generate the encryption key that secures communications between the client and the server.")]
+        public string? PassPhrase { get; set; }
+
+        [Option('c', "client", Required = false, HelpText = "Use SharpShellPipe as the client to receive a remote interactive shell.")]        
+        public bool Client { get; set; }
+
+        [Option('n', "name", Required = false, HelpText = "The Windows machine name where ShellPipeServer is running is required to connect to a remote named pipe. By default, it attempts to connect to the local machine (client mode only).")]
+        public string? ServerName { get; set; }
+
+        [Option("username", Required = false, HelpText = "An existing Microsoft Windows user account (server mode only).")]
+        public string? Username { get; set; }
+
+        [Option("password", Required = false, HelpText = "Password of specified user account (server mode only).")]
+        public string? Password { get; set; }
+
+        [Option("domain", Required = false, HelpText = "Specify the domain of the user account under which the new process is to be started (server mode only).")]
+        public string? Domain { get; set; }
+    }
+
+    /// <summary>
     /// Program Entrypoint
     /// </summary>
     /// <param name="args"></param>
     public static void Main(string[] args)
     {
-        bool server = true;
-        foreach (string arg in args)
-        {
-            if (arg == "--client")
+        Parser.Default.ParseArguments<Options>(args)
+            .WithParsed<Options>(o =>
             {
-                server = false;
+                if (o.Client)                                    
+                    ShellPipeClient(o.ServerName, o.PassPhrase);                
+                else
+                {
+                    System.Security.SecureString? securePassword = null;
 
-                break;
-            }
-        }
+                    if (!string.IsNullOrEmpty(o.Password))
+                        securePassword = new NetworkCredential("", o.Password).SecurePassword;
 
-        if (server) // Default
-            ShellPipeServer();
-        else
-        {
-            Console.Write("Please write target computer name (Default: local): ");
-            string? serverComputerName = Console.ReadLine();
-
-            ShellPipeClient(serverComputerName);
-        }
+                    ShellPipeServer(
+                        encryptionPassphrase: o.PassPhrase, userName: o.Username,
+                        password: securePassword,
+                        domain: o.Domain
+                    );
+                }
+            });    
     }
 }
